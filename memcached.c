@@ -121,6 +121,8 @@ static conn *listen_conn = NULL;
 static int max_fds;
 static struct event_base *main_base;
 
+static unsigned long key_max = 450000000UL;
+
 enum transmit_result {
     TRANSMIT_COMPLETE,   /** All done writing. */
     TRANSMIT_INCOMPLETE, /** More data remaining to write. */
@@ -1572,11 +1574,6 @@ static int _store_item_copy_data(int comm, item *old_it, item *new_it, item *add
  */
 enum store_item_type do_store_item(item *it, int comm, LIBEVENT_THREAD *t, const uint32_t hv, int *nbytes, uint64_t *cas, uint64_t cas_in, bool cas_stale) {
     char *key = ITEM_key(it);
-
-    fprintf(stderr, "do_store_item comm=%d t at %p hv=%d nbytes at %p\n", comm, (void *) t, hv, (void *)nbytes);
-    if (nbytes) {
-        printf("nbytes=%d\n", *nbytes);
-    }
 
     item *old_it = do_item_get(key, it->nkey, hv, t, DONT_UPDATE);
     enum store_item_type stored = NOT_STORED;
@@ -4721,53 +4718,69 @@ static int _mc_meta_load_cb(const char *tag, void *ctx, void *data) {
     return reuse_mmap;
 }
 
-#define KEY_MAX 10
-#define N_ITER 10
+/* 1 << 23, 1225MB; target 64G */
+/* 1 << 29, 1225 * 64 */
+
+#define N_ITER (30000000UL)
+
+#define KEY_MAX_LEN  128
+#define BENCHMARK_VALUE_SIZE (8 * sizeof(long))
+
 static void insert_keys() {
-    for (int i = 0; i < KEY_MAX; i++) {
-        char key[64];
-        char value[64];
+    printf("key_max=%lu\n", key_max);
+    for (size_t i = 0; i < key_max; i++) {
+        char key[KEY_MAX_LEN + 1];
+        char val[BENCHMARK_VALUE_SIZE+1];
+
+        if ((i % (1000000)) == 0) {
+            fprintf(stderr, "Key %lu M / %lu M\n", i / 1000000, key_max / 1000000);
+        }
+
         int nbytes = 0;
         uint64_t cas = 0;
         enum store_item_type ret;
 
-        sprintf(key, "key%d", i);      // Create keys like key0, key1, ...
-        sprintf(value, "value%d", i);  // Create values like value0, value1, ...
+        snprintf(key, KEY_MAX_LEN, "my-key-0x%016lx", i);
+        snprintf(val, BENCHMARK_VALUE_SIZE, "my-dummy-value-for-key-0x%016lx", i);
 
         // Allocate memory for the item and insert into cache
-        item *it = item_alloc(key, strlen(key), 0, 0, strlen(value) + 1);
+        item *it = item_alloc(key, strlen(key), 0, 0, strlen(val) + 1);
         
         if (it != NULL) {
-            memcpy(ITEM_data(it), value, strlen(value) + 1);  // Copy value into the item
+            memcpy(ITEM_data(it), val, strlen(val) + 1);  // Copy value into the item
             ret = store_item(it, NREAD_SET, select_standalone_thread(), &nbytes, &cas, 0, 0);  // Store the item in the cache
             if (ret == STORED) {
-                printf("Key: %s, Value: %s inserted\n", key, value);  // Print key-value pair
+                // fprintf(stderr, "Key: %s, Value: %s inserted\n", key, val);  // Print key-value pair
             } else {
-                printf("Key: %s, Value: %s not inserted ret=%d\n", key, value, ret);  // Print error if not inserted
+                fprintf(stderr, "Key: %s, Value: %s not inserted ret=%d\n", key, val, ret);  // Print error if not inserted
             }
-        
+        } else {
+            fprintf(stderr, "Key: %s, Value: %s allocation failed\n", key, val); 
         }
     }
 }
 
-static void read_keys(int n) {
-    // for (int j = 0; j < n; j++) {
-        for (int i = 0; i < KEY_MAX; i++) {
-            char key[64];
-            sprintf(key, "key%d", i);  // Construct the key like key0, key1, ...
+static void read_keys() {
+    srand(0xdeadbeef);
 
-            // Retrieve the item from cache
-            const size_t nkey = strlen(key);
-            uint32_t hv = hash(key, nkey);       
-            item *it = assoc_find(key, nkey, hv);
+    __asm__ volatile ("xchgq %r10, %r10");
 
-            if (it != NULL) {
-                printf("Key: %s, Value: %s\n", key, ITEM_data(it));  // Print key-value pair
-            } else {
-                printf("Key: %s not found\n", key);  // Print error if not found
-            }
+    for (size_t k = 0; k < N_ITER; k++) {
+        
+        size_t i = (size_t)rand() % (key_max);
+        char key[KEY_MAX_LEN + 1];
+        snprintf(key, KEY_MAX_LEN, "my-key-0x%016lx", i);
+
+        // Retrieve the item from cache
+        const size_t nkey = strlen(key);
+        uint32_t hv = hash(key, nkey);       
+        item *it = assoc_find(key, nkey, hv);
+
+        if (it == NULL) {
+            fprintf(stderr, "Key: %s not found\n", key);  // Print error if not found
         }
-    // }
+    }
+    __asm__ volatile ("xchgq %r11, %r11");
 }
 
 
@@ -5038,6 +5051,7 @@ int main (int argc, char **argv) {
         {"memory-file", required_argument, 0, 'e'},
         {"extended", required_argument, 0, 'o'},
         {"napi-ids", required_argument, 0, 'N'},
+        {"key-max", required_argument, 0, 'K'},
         {0, 0, 0, 0}
     };
     int optindex;
@@ -5265,6 +5279,9 @@ int main (int argc, char **argv) {
                 fprintf(stderr, "Maximum number of NAPI IDs must be greater than 0\n");
                 return 1;
             }
+            break;
+        case 'K':
+            key_max = atoi(optarg);
             break;
         case 'o': /* It's sub-opts time! */
             subopts_orig = subopts = strdup(optarg); /* getsubopt() changes the original args */
@@ -6254,8 +6271,8 @@ int main (int argc, char **argv) {
     printf("stop_main_loop=%d\n", stop_main_loop);
     
     insert_keys();
-    
-    read_keys(0);
+
+    read_keys();
 
 
     /* enter the event loop */
