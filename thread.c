@@ -705,6 +705,13 @@ static LIBEVENT_THREAD *select_thread_round_robin(void)
     return threads + tid;
 }
 
+LIBEVENT_THREAD * select_standalone_thread(void)
+{
+    if (settings.num_threads > 1) {
+        return &threads[0];
+    }
+}
+
 static void reset_threads_napi_id(void)
 {
     LIBEVENT_THREAD *thread;

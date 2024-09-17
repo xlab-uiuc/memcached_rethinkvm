@@ -978,7 +978,9 @@ void item_stats_sizes(ADD_STAT add_stats, void *c) {
 
 /** wrapper around assoc_find which does the lazy expiration logic */
 item *do_item_get(const char *key, const size_t nkey, const uint32_t hv, LIBEVENT_THREAD *t, const bool do_update) {
+    printf("do_item_get key=%s n_key=%ld hv=%d t at %p\n", key, nkey, hv, (void *) t);
     item *it = assoc_find(key, nkey, hv);
+    printf("find item at %p\n", (void *) it);
     if (it != NULL) {
         refcount_incr(it);
         /* Optimization for slab reassignment. prevents popular items from
