@@ -121,7 +121,9 @@ static conn *listen_conn = NULL;
 static int max_fds;
 static struct event_base *main_base;
 
-static unsigned long key_max = 450000000UL;
+/* 10M KV pairs with V=1KB, 11.3G */
+/* 69G need 61M */
+static unsigned long key_max = 15UL;
 
 enum transmit_result {
     TRANSMIT_COMPLETE,   /** All done writing. */
@@ -4724,10 +4726,24 @@ static int _mc_meta_load_cb(const char *tag, void *ctx, void *data) {
 #define N_ITER (30000000UL)
 
 #define KEY_MAX_LEN  128
-#define BENCHMARK_VALUE_SIZE (8 * sizeof(long))
+#define BENCHMARK_VALUE_SIZE (1024)
+#define VALUE_ID_LENGTH 18
+
+static void generate_string(char *str, int length, char fill_char) {
+    for (int i = 0; i < length; i++) {
+        str[i] = fill_char;
+    }
+    str[length] = '\0'; // Null-terminate the string
+}
+
 
 static void insert_keys() {
-    printf("key_max=%lu\n", key_max);
+    printf("key_max=%lu BENCHMARK_VALUE_SIZE=%d\n", key_max, BENCHMARK_VALUE_SIZE);
+
+    char val_prefix[BENCHMARK_VALUE_SIZE - VALUE_ID_LENGTH + 1];
+
+    generate_string(val_prefix, BENCHMARK_VALUE_SIZE - VALUE_ID_LENGTH, 'a');
+
     for (size_t i = 0; i < key_max; i++) {
         char key[KEY_MAX_LEN + 1];
         char val[BENCHMARK_VALUE_SIZE+1];
@@ -4741,7 +4757,9 @@ static void insert_keys() {
         enum store_item_type ret;
 
         snprintf(key, KEY_MAX_LEN, "my-key-0x%016lx", i);
-        snprintf(val, BENCHMARK_VALUE_SIZE, "my-dummy-value-for-key-0x%016lx", i);
+        // snprintf(val, BENCHMARK_VALUE_SIZE, "my-dummy-value-for-key-0x%016lx", i);
+        // memcpy(val, val_prefix, BENCHMARK_VALUE_SIZE - VALUE_ID_LENGTH);
+        snprintf(val, BENCHMARK_VALUE_SIZE + 1, "%s0x%016lx", val_prefix, i);
 
         // Allocate memory for the item and insert into cache
         item *it = item_alloc(key, strlen(key), 0, 0, strlen(val) + 1);
@@ -4758,10 +4776,14 @@ static void insert_keys() {
             fprintf(stderr, "Key: %s, Value: %s allocation failed\n", key, val); 
         }
     }
+
+    printf("Key insertion done\n");
+
 }
 
 static void read_keys() {
     srand(0xdeadbeef);
+    printf("read keys start!\n");
 
     __asm__ volatile ("xchgq %r10, %r10");
 
@@ -4780,7 +4802,9 @@ static void read_keys() {
             fprintf(stderr, "Key: %s not found\n", key);  // Print error if not found
         }
     }
+    
     __asm__ volatile ("xchgq %r11, %r11");
+    printf("read keys done!\n");
 }
 
 
@@ -5010,6 +5034,7 @@ int main (int argc, char **argv) {
           "e:"  /* mmap path for external item memory */
           "o:"  /* Extended generic options */
           "N:"  /* NAPI ID based thread selection */
+          "K:"  /* max number of keys */
           ;
 
     /* process arguments */
@@ -6274,6 +6299,8 @@ int main (int argc, char **argv) {
 
     read_keys();
 
+    stop_main_loop = GRACE_STOP;
+    goto BENCH_STOP;
 
     /* enter the event loop */
     while (!stop_main_loop) {
@@ -6282,6 +6309,8 @@ int main (int argc, char **argv) {
             break;
         }
     }
+
+BENCH_STOP:
 
     switch (stop_main_loop) {
         case GRACE_STOP:
