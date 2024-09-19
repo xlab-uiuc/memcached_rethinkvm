@@ -124,6 +124,8 @@ static struct event_base *main_base;
 /* 10M KV pairs with V=1KB, 11.3G */
 /* 69G need 61M */
 static unsigned long key_max = 15UL;
+static int running_insertion_ratio = 0;
+static unsigned long n_running_phase_ops = 10000000UL;
 
 enum transmit_result {
     TRANSMIT_COMPLETE,   /** All done writing. */
@@ -4189,6 +4191,13 @@ static void usage(void) {
 #endif
     ssl_help();
     printf("-N, --napi_ids            number of napi ids. see doc/napi_ids.txt for more details\n");
+
+    printf("\nStandalone application options:\n");
+    printf("-K, --key-max=<num>       maximum number of keys in loading phase (default: %ld)\n", key_max);
+    printf("-O, --n-running-ops=<num> number of running phase operations (default: %ld)\n", n_running_phase_ops);
+    printf("-w, --running-insertion-ratio=<num> ratio of running insertions in running phase\n"
+           "                          (default: %d%%)\n", running_insertion_ratio);
+
     return;
 }
 
@@ -4722,89 +4731,125 @@ static int _mc_meta_load_cb(const char *tag, void *ctx, void *data) {
 
 /* 1 << 23, 1225MB; target 64G */
 /* 1 << 29, 1225 * 64 */
-
-#define N_ITER (30000000UL)
-
 #define KEY_MAX_LEN  128
 #define BENCHMARK_VALUE_SIZE (1024)
 #define VALUE_ID_LENGTH 18
 
-static void generate_string(char *str, int length, char fill_char) {
-    for (int i = 0; i < length; i++) {
-        str[i] = fill_char;
+static enum store_item_type insert_key_at_index(size_t i) {
+    int nbytes = 0;
+    uint64_t cas = 0;
+    enum store_item_type ret = NOT_STORED;
+
+    char key[KEY_MAX_LEN + 1];
+    char val[BENCHMARK_VALUE_SIZE + 1];
+
+    snprintf(key, KEY_MAX_LEN, "my-key-0x%016lx", i);
+    memset(val, 'a', BENCHMARK_VALUE_SIZE - VALUE_ID_LENGTH);
+    snprintf(&val[BENCHMARK_VALUE_SIZE - VALUE_ID_LENGTH], VALUE_ID_LENGTH + 1, "0x%016lx", i);
+
+    // Allocate memory for the item and insert into cache
+    item *it = item_alloc(key, strlen(key), 0, 0, strlen(val) + 1);
+    if (it != NULL) {
+        memcpy(ITEM_data(it), val, strlen(val) + 1); // Copy value into the item
+        ret = store_item(it, NREAD_SET, select_standalone_thread(), &nbytes,
+                         &cas, 0, 0); // Store the item in the cache
+
+        if (settings.verbose >= 1 && ret == STORED) {
+            fprintf(stderr, "Key: %s, Value: %s inserted\n", key, val);  // Print key-value pair
+        }
+
+        if (ret != STORED) {
+            fprintf(stderr, "Key: %s, Value: %s not inserted ret=%d\n", key,
+                    val, ret); // Print error if not inserted
+        }
+    } else {
+        fprintf(stderr, "Key: %s, Value: %s allocation failed\n", key, val);
     }
-    str[length] = '\0'; // Null-terminate the string
+
+    return ret;
 }
 
-
-static void insert_keys() {
+static void loading_phase() {
     printf("key_max=%lu BENCHMARK_VALUE_SIZE=%d\n", key_max, BENCHMARK_VALUE_SIZE);
-
-    char val_prefix[BENCHMARK_VALUE_SIZE - VALUE_ID_LENGTH + 1];
-
-    generate_string(val_prefix, BENCHMARK_VALUE_SIZE - VALUE_ID_LENGTH, 'a');
+    fflush(stdout);
 
     for (size_t i = 0; i < key_max; i++) {
-        char key[KEY_MAX_LEN + 1];
-        char val[BENCHMARK_VALUE_SIZE+1];
+        // char key[KEY_MAX_LEN + 1];
+        // char val[BENCHMARK_VALUE_SIZE+1];
 
         if ((i % (1000000)) == 0) {
             fprintf(stderr, "Key %lu M / %lu M\n", i / 1000000, key_max / 1000000);
         }
 
-        int nbytes = 0;
-        uint64_t cas = 0;
-        enum store_item_type ret;
-
-        snprintf(key, KEY_MAX_LEN, "my-key-0x%016lx", i);
-        // snprintf(val, BENCHMARK_VALUE_SIZE, "my-dummy-value-for-key-0x%016lx", i);
-        // memcpy(val, val_prefix, BENCHMARK_VALUE_SIZE - VALUE_ID_LENGTH);
-        snprintf(val, BENCHMARK_VALUE_SIZE + 1, "%s0x%016lx", val_prefix, i);
-
-        // Allocate memory for the item and insert into cache
-        item *it = item_alloc(key, strlen(key), 0, 0, strlen(val) + 1);
-        
-        if (it != NULL) {
-            memcpy(ITEM_data(it), val, strlen(val) + 1);  // Copy value into the item
-            ret = store_item(it, NREAD_SET, select_standalone_thread(), &nbytes, &cas, 0, 0);  // Store the item in the cache
-            if (ret == STORED) {
-                // fprintf(stderr, "Key: %s, Value: %s inserted\n", key, val);  // Print key-value pair
-            } else {
-                fprintf(stderr, "Key: %s, Value: %s not inserted ret=%d\n", key, val, ret);  // Print error if not inserted
-            }
-        } else {
-            fprintf(stderr, "Key: %s, Value: %s allocation failed\n", key, val); 
-        }
+        insert_key_at_index(i);
     }
 
     printf("Key insertion done\n");
+    fflush(stdout);
 
 }
 
-static void read_keys() {
+
+static bool do_insert(int insertion_ratio) {
+    return (rand() % 100) < insertion_ratio;
+}
+
+/**
+ * @insertion_ratio: integer between 0 and 100
+ */
+static void running_phase(int insertion_ratio) {
     srand(0xdeadbeef);
-    printf("read keys start!\n");
+    printf("running phase starts! n_running_phase_ops=%ld insertion ratio=%d%%\n", 
+        n_running_phase_ops,  insertion_ratio);
+    fflush(stdout);
 
     __asm__ volatile ("xchgq %r10, %r10");
 
-    for (size_t k = 0; k < N_ITER; k++) {
+    for (size_t k = 0; k < n_running_phase_ops; k++) {
         
-        size_t i = (size_t)rand() % (key_max);
-        char key[KEY_MAX_LEN + 1];
-        snprintf(key, KEY_MAX_LEN, "my-key-0x%016lx", i);
-
-        // Retrieve the item from cache
-        const size_t nkey = strlen(key);
-        uint32_t hv = hash(key, nkey);       
-        item *it = assoc_find(key, nkey, hv);
-
-        if (it == NULL) {
-            fprintf(stderr, "Key: %s not found\n", key);  // Print error if not found
+        if ((k % (1000)) == 0) {
+            fprintf(stderr, "Key %lu k / %lu k\n", k / 1000, n_running_phase_ops / 1000);
         }
+
+        bool do_insertion = do_insert(insertion_ratio);
+
+        if (do_insertion) {
+            // printf("inserting key_max=%lx\n", key_max);
+            // fflush(stdout);
+            enum store_item_type ret = insert_key_at_index(key_max);
+            if (ret == STORED) {
+                key_max++;
+            }
+
+        } else {
+            /* read keys */
+            size_t i = (size_t)rand() % (key_max);
+            char key[KEY_MAX_LEN + 1];
+            snprintf(key, KEY_MAX_LEN, "my-key-0x%016lx", i);
+
+            // printf("retrieving key=%s\n", key);
+            // fflush(stdout);
+
+
+            // Retrieve the item from cache
+            const size_t nkey = strlen(key);
+            uint32_t hv = hash(key, nkey);       
+            item *it = assoc_find(key, nkey, hv);
+
+            if (settings.verbose >= 1 && it != NULL) {
+                fprintf(stderr, "Key: %s, Value: %s found\n", key, ITEM_data(it));  // Print key-value pair
+            }
+
+            if (it == NULL) {
+                fprintf(stderr, "Key: %s not found\n", key);  // Print error if not found
+            }
+        }
+        
     }
     
     __asm__ volatile ("xchgq %r11, %r11");
-    printf("read keys done!\n");
+    printf("running phase finishes!\n");
+    fflush(stdout);
 }
 
 
@@ -5035,6 +5080,8 @@ int main (int argc, char **argv) {
           "o:"  /* Extended generic options */
           "N:"  /* NAPI ID based thread selection */
           "K:"  /* max number of keys */
+          "w:"  /* running insertion ratio */
+          "O:"  /* number of running operations */
           ;
 
     /* process arguments */
@@ -5077,6 +5124,8 @@ int main (int argc, char **argv) {
         {"extended", required_argument, 0, 'o'},
         {"napi-ids", required_argument, 0, 'N'},
         {"key-max", required_argument, 0, 'K'},
+        {"running-insertion-ratio", required_argument, 0, 'w'},
+        {"n-running-ops", required_argument, 0, 'O'},
         {0, 0, 0, 0}
     };
     int optindex;
@@ -5307,6 +5356,12 @@ int main (int argc, char **argv) {
             break;
         case 'K':
             key_max = atoi(optarg);
+            break;
+        case 'w':
+            running_insertion_ratio = atoi(optarg);
+            break;
+        case 'O':
+            n_running_phase_ops = atoi(optarg);
             break;
         case 'o': /* It's sub-opts time! */
             subopts_orig = subopts = strdup(optarg); /* getsubopt() changes the original args */
@@ -6295,9 +6350,9 @@ int main (int argc, char **argv) {
 
     printf("stop_main_loop=%d\n", stop_main_loop);
     
-    insert_keys();
+    loading_phase();
 
-    read_keys();
+    running_phase(running_insertion_ratio);
 
     stop_main_loop = GRACE_STOP;
     goto BENCH_STOP;
