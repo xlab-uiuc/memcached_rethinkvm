@@ -4773,6 +4773,9 @@ static void loading_phase() {
     printf("key_max=%lu BENCHMARK_VALUE_SIZE=%d\n", key_max, BENCHMARK_VALUE_SIZE);
     fflush(stdout);
 
+    struct timeval loading_tstart, loading_tend;
+    gettimeofday(&loading_tstart, NULL);
+
     for (size_t i = 0; i < key_max; i++) {
         // char key[KEY_MAX_LEN + 1];
         // char val[BENCHMARK_VALUE_SIZE+1];
@@ -4783,7 +4786,13 @@ static void loading_phase() {
 
         insert_key_at_index(i);
     }
+    gettimeofday(&loading_tend, NULL);
 
+    int64_t elapsed = (loading_tend.tv_sec - loading_tstart.tv_sec) * 1000000 + loading_tend.tv_usec - loading_tstart.tv_usec;
+
+    printf("Loading phase took: %zu.%03zu seconds\n", elapsed / 1000000, (elapsed % 1000000) / 1000);
+    printf("Loading average latency %.03f us throughput %.03f ops/sec\n", 
+        (double)elapsed / key_max, key_max / ((double)elapsed / 1000000));
     printf("Key insertion done\n");
     fflush(stdout);
 
@@ -4802,7 +4811,17 @@ static void running_phase(int insertion_ratio) {
     printf("running phase starts! n_running_phase_ops=%ld insertion ratio=%d%%\n", 
         n_running_phase_ops,  insertion_ratio);
     fflush(stdout);
+    
+    struct timeval tstart, tend;
+    struct timeval start_tmp, end_tmp;
+    gettimeofday(&tstart, NULL);
+    
+    int64_t n_insert_times = 0;
+    int64_t n_read_times = 0;
 
+    int64_t total_insert_time = 0;
+    int64_t total_read_time = 0;
+    
     __asm__ volatile ("xchgq %r10, %r10");
 
     for (size_t k = 0; k < n_running_phase_ops; k++) {
@@ -4816,12 +4835,22 @@ static void running_phase(int insertion_ratio) {
         if (do_insertion) {
             // printf("inserting key_max=%lx\n", key_max);
             // fflush(stdout);
+            gettimeofday(&start_tmp, NULL);
+
             enum store_item_type ret = insert_key_at_index(key_max);
             if (ret == STORED) {
                 key_max++;
             }
 
+            
+            gettimeofday(&end_tmp, NULL);
+            total_insert_time += (end_tmp.tv_sec - start_tmp.tv_sec) * 1000000 +
+                                (end_tmp.tv_usec - start_tmp.tv_usec);
+            n_insert_times++;
+
         } else {
+            
+            gettimeofday(&start_tmp, NULL);
             /* read keys */
             size_t i = (size_t)rand() % (key_max);
             char key[KEY_MAX_LEN + 1];
@@ -4843,11 +4872,29 @@ static void running_phase(int insertion_ratio) {
             if (it == NULL) {
                 fprintf(stderr, "Key: %s not found\n", key);  // Print error if not found
             }
+            
+            gettimeofday(&end_tmp, NULL);
+            total_read_time += (end_tmp.tv_sec - start_tmp.tv_sec) * 1000000 +
+                                (end_tmp.tv_usec - start_tmp.tv_usec);
+            n_read_times++;
         }
         
     }
     
     __asm__ volatile ("xchgq %r11, %r11");
+
+    gettimeofday(&tend, NULL);
+    int64_t elapsed = (tend.tv_sec - tstart.tv_sec) * 1000000 + tend.tv_usec - tstart.tv_usec;
+    printf("Running phase took: %zu.%03zu seconds\n", elapsed / 1000000, (elapsed % 1000000) / 1000);
+    printf("Running phase average latency %.03f us throughput %.03f ops/sec\n", 
+        (double)elapsed / n_running_phase_ops, n_running_phase_ops / ((double)elapsed / 1000000));
+
+    printf("[READ] %ld operations, average latency %.03f us, throughput %.03f ops/sec\n",
+        n_read_times, (double)total_read_time / n_read_times, n_read_times / ((double)total_read_time / 1000000));
+
+    printf("[UPDATE] %ld operations average latency %.03f us throughput %.03f ops/sec\n", 
+        n_insert_times, (double)total_insert_time / n_insert_times, n_insert_times / ((double)total_insert_time / 1000000));
+
     printf("running phase finishes!\n");
     fflush(stdout);
 }
