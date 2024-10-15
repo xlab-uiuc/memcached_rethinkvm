@@ -4886,13 +4886,13 @@ static void running_phase(int insertion_ratio) {
     gettimeofday(&tend, NULL);
     int64_t elapsed = (tend.tv_sec - tstart.tv_sec) * 1000000 + tend.tv_usec - tstart.tv_usec;
     printf("Running phase took: %zu.%03zu seconds\n", elapsed / 1000000, (elapsed % 1000000) / 1000);
-    printf("Running phase average latency %.03f us throughput %.03f ops/sec\n", 
+    printf("Running phase average latency %.03f us, throughput %.03f ops/sec\n", 
         (double)elapsed / n_running_phase_ops, n_running_phase_ops / ((double)elapsed / 1000000));
 
     printf("[READ] %ld operations, average latency %.03f us, throughput %.03f ops/sec\n",
         n_read_times, (double)total_read_time / n_read_times, n_read_times / ((double)total_read_time / 1000000));
 
-    printf("[UPDATE] %ld operations average latency %.03f us throughput %.03f ops/sec\n", 
+    printf("[UPDATE] %ld operations, average latency %.03f us, throughput %.03f ops/sec\n", 
         n_insert_times, (double)total_insert_time / n_insert_times, n_insert_times / ((double)total_insert_time / 1000000));
 
     printf("running phase finishes!\n");
