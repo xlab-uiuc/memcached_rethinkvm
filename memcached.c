@@ -132,6 +132,10 @@ static unsigned long n_running_phase_ops = 10000000UL;
 #define RECORD_LOADING 2
 static int record_stage = 1; 
 
+/* enable / disable perf */
+#define ENABLE_PERF asm volatile("xchg %r10, %r10")
+#define DISABLE_PERF asm volatile("xchg %r11, %r11")
+
 enum transmit_result {
     TRANSMIT_COMPLETE,   /** All done writing. */
     TRANSMIT_INCOMPLETE, /** More data remaining to write. */
@@ -6409,19 +6413,19 @@ int main (int argc, char **argv) {
     printf("stop_main_loop=%d\n", stop_main_loop);
     
     if(record_stage & RECORD_LOADING) {
-        // start perf
+        ENABLE_PERF;
     }
     loading_phase();
     if(record_stage & RECORD_LOADING) {
-        // end perf
+        DISABLE_PERF;
     }
 
     if(record_stage & RECORD_RUNNING) {
-        // start perf
+        ENABLE_PERF;
     }
     running_phase(running_insertion_ratio);
     if(record_stage & RECORD_RUNNING) {
-        // end perf
+        DISABLE_PERF;
     }
 
     stop_main_loop = GRACE_STOP;
