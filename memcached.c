@@ -127,6 +127,11 @@ static unsigned long key_max = 15UL;
 static int running_insertion_ratio = 0;
 static unsigned long n_running_phase_ops = 10000000UL;
 
+/* Record specified stage */
+#define RECORD_RUNNING 1
+#define RECORD_LOADING 2
+static int record_stage = 1; 
+
 enum transmit_result {
     TRANSMIT_COMPLETE,   /** All done writing. */
     TRANSMIT_INCOMPLETE, /** More data remaining to write. */
@@ -4195,6 +4200,7 @@ static void usage(void) {
     printf("\nStandalone application options:\n");
     printf("-K, --key-max=<num>       maximum number of keys in loading phase (default: %ld)\n", key_max);
     printf("-O, --n-running-ops=<num> number of running phase operations (default: %ld)\n", n_running_phase_ops);
+    printf("-T, --record-stage=<num> Stage to record data (default: %d)\n", record_stage);
     printf("-w, --running-insertion-ratio=<num> ratio of running insertions in running phase\n"
            "                          (default: %d%%)\n", running_insertion_ratio);
 
@@ -5129,6 +5135,7 @@ int main (int argc, char **argv) {
           "K:"  /* max number of keys */
           "w:"  /* running insertion ratio */
           "O:"  /* number of running operations */
+          "T:"  /* record stage (decides loading / running phase )*/
           ;
 
     /* process arguments */
@@ -5173,6 +5180,7 @@ int main (int argc, char **argv) {
         {"key-max", required_argument, 0, 'K'},
         {"running-insertion-ratio", required_argument, 0, 'w'},
         {"n-running-ops", required_argument, 0, 'O'},
+        {"record-stage", required_argument, 0, 'T'},
         {0, 0, 0, 0}
     };
     int optindex;
@@ -5410,6 +5418,9 @@ int main (int argc, char **argv) {
         case 'O':
             n_running_phase_ops = atoi(optarg);
             break;
+        case 'T':
+            record_stage = atoi(optarg);
+            break; 
         case 'o': /* It's sub-opts time! */
             subopts_orig = subopts = strdup(optarg); /* getsubopt() changes the original args */
 
@@ -6397,9 +6408,21 @@ int main (int argc, char **argv) {
 
     printf("stop_main_loop=%d\n", stop_main_loop);
     
+    if(record_stage & RECORD_LOADING) {
+        // start perf
+    }
     loading_phase();
+    if(record_stage & RECORD_LOADING) {
+        // end perf
+    }
 
+    if(record_stage & RECORD_RUNNING) {
+        // start perf
+    }
     running_phase(running_insertion_ratio);
+    if(record_stage & RECORD_RUNNING) {
+        // end perf
+    }
 
     stop_main_loop = GRACE_STOP;
     goto BENCH_STOP;
