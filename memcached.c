@@ -131,6 +131,8 @@ static unsigned long n_running_phase_ops = 10000000UL;
 #define RECORD_RUNNING 1
 #define RECORD_LOADING 2
 static int record_stage = 1; 
+static int perf_ctl_fd = -1;
+static int perf_ack_fd = -1;
 
 /* enable / disable perf */
 #define ENABLE_PERF asm volatile("xchg %r10, %r10")
@@ -4779,12 +4781,109 @@ static enum store_item_type insert_key_at_index(size_t i) {
     return ret;
 }
 
+static int get_fifo_fd(const char * fifo_name, int flags) {
+    int fd = open(fifo_name, flags);
+    if (fd == -1) {
+        perror("open");
+        exit(EXIT_FAILURE);
+    }
+    return fd;
+}
+
+static void enable_perf()
+{
+    char ack[5];
+    
+    #define SYS_show_pgtable 600
+    long res = syscall(SYS_show_pgtable);
+    printf("System call returned %ld\n", res);
+
+    if (perf_ctl_fd != -1) {
+        ssize_t bytes_written = write(perf_ctl_fd, "enable\n", 8);
+        if (bytes_written != 8) {
+            fprintf(stderr, "Error: Failed to write 8 bytes to perf_ctl_fd\n");
+            // You can add additional error handling here if necessary
+        }
+        assert(bytes_written == 8);
+    }
+
+    if (perf_ack_fd != -1) {
+        ssize_t bytes_read = read(perf_ack_fd, ack, 5);
+        if (bytes_read != 5) {
+            fprintf(stderr, "Error: Failed to write 5 bytes to perf_ack_fd\n");
+            // You can add additional error handling here if necessary
+        }
+        assert(bytes_read == 5 && strcmp(ack, "ack\n") == 0);
+    }
+
+    __asm__ volatile ("xchgq %r10, %r10");
+}
+
+static void disable_perf()
+{
+    char ack[5];
+    __asm__ volatile ("xchgq %r11, %r11");
+
+    #define SYS_show_pgtable 600
+    long res = syscall(SYS_show_pgtable);
+    printf("System call returned %ld\n", res);
+    
+    if (perf_ctl_fd != -1) {
+        ssize_t bytes_written = write(perf_ctl_fd, "disable\n", 9);
+        if (bytes_written != 8) {
+            fprintf(stderr, "Error: Failed to write 8 bytes to perf_ctl_fd\n");
+            // You can add additional error handling here if necessary
+        }
+        assert(bytes_written == 9);
+    }
+
+    if (perf_ack_fd != -1) {
+        ssize_t bytes_read = read(perf_ack_fd, ack, 5);
+        if (bytes_read != 5) {
+            fprintf(stderr, "Error: Failed to write 5 bytes to perf_ack_fd\n");
+            // You can add additional error handling here if necessary
+        }
+        assert(bytes_read == 5 && strcmp(ack, "ack\n") == 0);
+    }
+}
+
+#define TRY_ENABLE_PERF_LOADING()   \
+    do {                            \
+        if (record_stage & RECORD_LOADING) { \
+            enable_perf();           \
+        }                            \
+    } while (0)
+
+#define TRY_DISABLE_PERF_LOADING()  \
+    do {                            \
+        if (record_stage & RECORD_LOADING) { \
+            disable_perf();          \
+        }                            \
+    } while (0)
+
+#define TRY_ENABLE_PERF_RUNNING()   \
+    do {                            \
+        if (record_stage & RECORD_RUNNING) { \
+            enable_perf();           \
+        }                            \
+    } while (0)
+
+#define TRY_DISABLE_PERF_RUNNING()  \
+    do {                            \
+        if (record_stage & RECORD_RUNNING) { \
+            disable_perf();          \
+        }                            \
+    } while (0)
+
+
 static void loading_phase() {
     printf("key_max=%lu BENCHMARK_VALUE_SIZE=%d\n", key_max, BENCHMARK_VALUE_SIZE);
     fflush(stdout);
 
     struct timeval loading_tstart, loading_tend;
     gettimeofday(&loading_tstart, NULL);
+
+    TRY_ENABLE_PERF_LOADING();
 
     for (size_t i = 0; i < key_max; i++) {
         // char key[KEY_MAX_LEN + 1];
@@ -4796,6 +4895,8 @@ static void loading_phase() {
 
         insert_key_at_index(i);
     }
+
+    TRY_DISABLE_PERF_LOADING();
     gettimeofday(&loading_tend, NULL);
 
     int64_t elapsed = (loading_tend.tv_sec - loading_tstart.tv_sec) * 1000000 + loading_tend.tv_usec - loading_tstart.tv_usec;
@@ -4832,7 +4933,7 @@ static void running_phase(int insertion_ratio) {
     int64_t total_insert_time = 0;
     int64_t total_read_time = 0;
     
-    __asm__ volatile ("xchgq %r10, %r10");
+    TRY_ENABLE_PERF_RUNNING();
 
     for (size_t k = 0; k < n_running_phase_ops; k++) {
         
@@ -4891,7 +4992,8 @@ static void running_phase(int insertion_ratio) {
         
     }
     
-    __asm__ volatile ("xchgq %r11, %r11");
+    TRY_DISABLE_PERF_RUNNING();
+
 
     gettimeofday(&tend, NULL);
     int64_t elapsed = (tend.tv_sec - tstart.tv_sec) * 1000000 + tend.tv_usec - tstart.tv_usec;
@@ -5185,6 +5287,8 @@ int main (int argc, char **argv) {
         {"running-insertion-ratio", required_argument, 0, 'w'},
         {"n-running-ops", required_argument, 0, 'O'},
         {"record-stage", required_argument, 0, 'T'},
+        {"perf-ctrl-fifo", required_argument, 0, 0},
+        {"perf-ack-fifo", required_argument, 0, 0},
         {0, 0, 0, 0}
     };
     int optindex;
@@ -5425,6 +5529,19 @@ int main (int argc, char **argv) {
         case 'T':
             record_stage = atoi(optarg);
             break; 
+        case 0: // For long options with no short equivalent
+            if (strcmp("perf-ctrl-fifo", longopts[optindex].name) == 0) {
+                perf_ctl_fd = get_fifo_fd(optarg, O_WRONLY);
+                printf("Long option --perf-ctrl-fifo with value %s, perf_ctl_fd=%d\n", 
+                    optarg, perf_ctl_fd);
+            }
+
+            if (strcmp("perf-ack-fifo", longopts[optindex].name) == 0) {
+                perf_ack_fd = get_fifo_fd(optarg, O_WRONLY);
+                printf("Long option --perf-ack-fifo with value %s, perf_ack_fd=%d\n", optarg, perf_ack_fd);
+            }
+
+            break;
         case 'o': /* It's sub-opts time! */
             subopts_orig = subopts = strdup(optarg); /* getsubopt() changes the original args */
 
@@ -6412,21 +6529,9 @@ int main (int argc, char **argv) {
 
     printf("stop_main_loop=%d\n", stop_main_loop);
     
-    if(record_stage & RECORD_LOADING) {
-        ENABLE_PERF;
-    }
     loading_phase();
-    if(record_stage & RECORD_LOADING) {
-        DISABLE_PERF;
-    }
 
-    if(record_stage & RECORD_RUNNING) {
-        ENABLE_PERF;
-    }
     running_phase(running_insertion_ratio);
-    if(record_stage & RECORD_RUNNING) {
-        DISABLE_PERF;
-    }
 
     stop_main_loop = GRACE_STOP;
     goto BENCH_STOP;
