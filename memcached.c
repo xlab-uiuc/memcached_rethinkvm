@@ -130,6 +130,7 @@ static unsigned long n_running_phase_ops = 10000000UL;
 /* Record specified stage */
 #define RECORD_RUNNING 1
 #define RECORD_LOADING 2
+#define RECORD_LOADING_END 3 
 static int record_stage = 1; 
 static int perf_ctl_fd = -1;
 static int perf_ack_fd = -1;
@@ -4849,28 +4850,35 @@ static void disable_perf()
 
 #define TRY_ENABLE_PERF_LOADING()   \
     do {                            \
-        if (record_stage & RECORD_LOADING) { \
+        if (record_stage == RECORD_LOADING) { \
             enable_perf();           \
         }                            \
     } while (0)
 
+#define TRY_ENABLE_PERF_LOADING_END()   \
+do {                            \
+    if (record_stage == RECORD_LOADING_END) { \
+        enable_perf();           \
+    }                            \
+} while (0)
+
 #define TRY_DISABLE_PERF_LOADING()  \
     do {                            \
-        if (record_stage & RECORD_LOADING) { \
+        if (record_stage == RECORD_LOADING || record_stage == RECORD_LOADING_END) { \
             disable_perf();          \
         }                            \
     } while (0)
 
 #define TRY_ENABLE_PERF_RUNNING()   \
     do {                            \
-        if (record_stage & RECORD_RUNNING) { \
+        if (record_stage == RECORD_RUNNING) { \
             enable_perf();           \
         }                            \
     } while (0)
 
 #define TRY_DISABLE_PERF_RUNNING()  \
     do {                            \
-        if (record_stage & RECORD_RUNNING) { \
+        if (record_stage == RECORD_RUNNING) { \
             disable_perf();          \
         }                            \
     } while (0)
@@ -4885,7 +4893,21 @@ static void loading_phase() {
 
     TRY_ENABLE_PERF_LOADING();
 
-    for (size_t i = 0; i < key_max; i++) {
+    /* Note: the reason for having the for loops duplicated like this is to avoid 
+    having extra instructions that aren't related to the loading phase included in the
+    measurement by repeatively calling try_enable_perf... */
+    for (size_t i = 0; i < (19 * (key_max/20)); i++) {
+        // char key[KEY_MAX_LEN + 1];
+        // char val[BENCHMARK_VALUE_SIZE+1];
+
+        if ((i % (1000000)) == 0) {
+            fprintf(stderr, "Key %lu M / %lu M\n", i / 1000000, key_max / 1000000);
+        }
+
+        insert_key_at_index(i);
+    }
+    TRY_ENABLE_PERF_LOADING_END(); 
+    for (size_t i = (19 * (key_max/20)); i < key_max; i++) {
         // char key[KEY_MAX_LEN + 1];
         // char val[BENCHMARK_VALUE_SIZE+1];
 
