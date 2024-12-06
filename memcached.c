@@ -4917,7 +4917,87 @@ static bool do_insert(int insertion_ratio) {
 /**
  * @insertion_ratio: integer between 0 and 100
  */
+#define MAX_LATENCY 1000000 // Maximum latency expected in nanoseconds (1ms)
+#define BUCKET_SIZE 1 // Bucket size in nano
+#define N_BUCKET (MAX_LATENCY / BUCKET_SIZE)
+
+int64_t read_latencies[N_BUCKET];
+int64_t update_latencies[N_BUCKET];
+int64_t total_latencies[N_BUCKET];
+
+static int64_t get_elapsed_time(struct timespec *start, struct timespec *end) {
+    return (end->tv_sec - start->tv_sec) * 1000000000 + (end->tv_nsec - start->tv_nsec);
+}
+
+static void fill_bucket(int64_t elaspsed_time, int64_t * buckets)
+{
+    size_t bucket_index = (elaspsed_time < MAX_LATENCY) ? (elaspsed_time / BUCKET_SIZE) : (N_BUCKET - 1);
+    buckets[bucket_index]++;
+}
+
+static int64_t get_tail_latency(int64_t * buckets, uint64_t n_ops ,float percentile) {
+    size_t i = 0;
+    size_t total = 0;
+    size_t tail = n_ops * percentile;
+    printf("n_ops %lu, percentile=%f tail %lu\n", 
+        n_ops, percentile, tail);
+    while (i < N_BUCKET && total < tail) {
+        total += buckets[i];
+        i++;
+    }
+    return i * BUCKET_SIZE;
+}
+
+static int64_t get_p90(int64_t * buckets, uint64_t n_ops) {
+    return get_tail_latency(buckets, n_ops, 0.90);
+}
+
+static int64_t get_p95(int64_t * buckets, uint64_t n_ops) {
+    return get_tail_latency(buckets, n_ops, 0.95);
+}
+
+static int64_t get_p99(int64_t * buckets, uint64_t n_ops) {
+    return get_tail_latency(buckets, n_ops, 0.99);
+}
+
+static int64_t get_p999(int64_t * buckets, uint64_t n_ops) {
+    return get_tail_latency(buckets, n_ops, 0.999);
+}
+
+static int64_t get_p9999(int64_t * buckets, uint64_t n_ops) {
+    return get_tail_latency(buckets, n_ops, 0.9999);
+}
+
+static int64_t get_total_time(int64_t * buckets) {
+    int64_t total = 0;
+    for (int64_t i = 0; i < N_BUCKET; i++) {
+        total += buckets[i] * i * BUCKET_SIZE;
+    }
+    return total;
+}
+static double get_average(int64_t * buckets, uint64_t n_ops) {
+    int64_t total = get_total_time(buckets);
+    return (double) total / n_ops;
+}
+
+static double get_throughput(int64_t * buckets, uint64_t n_ops) {
+    int64_t total = get_total_time(buckets);
+    return ((double) n_ops / total) * 1000000000;
+}
+
+
+
 static void running_phase(int insertion_ratio) {
+
+    memset(read_latencies, 0, sizeof(read_latencies));
+    memset(update_latencies, 0, sizeof(update_latencies));
+    memset(total_latencies, 0, sizeof(total_latencies));
+
+    struct timespec update_each_tstart, update_each_tend;
+    struct timespec read_each_tstart, read_each_tend;
+    int64_t elapsed_update_each;
+
+
     srand(0xdeadbeef);
     printf("running phase starts! n_running_phase_ops=%ld insertion ratio=%d%%\n", 
         n_running_phase_ops,  insertion_ratio);
@@ -4948,11 +5028,17 @@ static void running_phase(int insertion_ratio) {
             // fflush(stdout);
             gettimeofday(&start_tmp, NULL);
 
+            clock_gettime(CLOCK_REALTIME, &update_each_tstart);
+
             enum store_item_type ret = insert_key_at_index(key_max);
             if (ret == STORED) {
                 key_max++;
             }
 
+            clock_gettime(CLOCK_REALTIME, &update_each_tend);
+            elapsed_update_each = get_elapsed_time(&update_each_tstart, &update_each_tend);
+            fill_bucket(elapsed_update_each, update_latencies);
+            fill_bucket(elapsed_update_each, total_latencies);
             
             gettimeofday(&end_tmp, NULL);
             total_insert_time += (end_tmp.tv_sec - start_tmp.tv_sec) * 1000000 +
@@ -4962,6 +5048,7 @@ static void running_phase(int insertion_ratio) {
         } else {
             
             gettimeofday(&start_tmp, NULL);
+            clock_gettime(CLOCK_REALTIME, &read_each_tstart);
             /* read keys */
             size_t i = (size_t)rand() % (key_max);
             char key[KEY_MAX_LEN + 1];
@@ -4984,6 +5071,12 @@ static void running_phase(int insertion_ratio) {
                 fprintf(stderr, "Key: %s not found\n", key);  // Print error if not found
             }
             
+            clock_gettime(CLOCK_REALTIME, &read_each_tend);
+            int64_t elapsed_read_each = get_elapsed_time(&read_each_tstart, &read_each_tend);
+            fill_bucket(elapsed_read_each, read_latencies);
+            fill_bucket(elapsed_read_each, total_latencies);
+
+
             gettimeofday(&end_tmp, NULL);
             total_read_time += (end_tmp.tv_sec - start_tmp.tv_sec) * 1000000 +
                                 (end_tmp.tv_usec - start_tmp.tv_usec);
@@ -5008,6 +5101,41 @@ static void running_phase(int insertion_ratio) {
         n_insert_times, (double)total_insert_time / n_insert_times, n_insert_times / ((double)total_insert_time / 1000000));
 
     printf("running phase finishes!\n");
+
+    printf("~~~~~~~~~ precise latency ~~~~~~~~~\n");
+
+
+    printf("[UPDATE] precise time: %ld ns\n", get_total_time(update_latencies));
+    printf("[UPDATE] precise throughput: %.03f ops/sec\n", get_throughput(update_latencies, n_insert_times));
+    printf("[UPDATE] precise average latency %.03f ns\n", get_average(update_latencies, n_insert_times));
+    printf("[UPDATE] p90 %ld p95 %ld p99 %ld p999 %ld p9999 %ld ns\n",
+        get_p90(update_latencies, n_insert_times),
+        get_p95(update_latencies, n_insert_times),
+        get_p99(update_latencies, n_insert_times),
+        get_p999(update_latencies, n_insert_times),
+        get_p9999(update_latencies, n_insert_times));
+
+    printf("[READ] precise time: %ld ns\n", get_total_time(read_latencies));
+    printf( "[READ] precise throughput: %.03f ops/sec\n", get_throughput(read_latencies, n_read_times));
+    printf( "[READ] precise average latency %.03f ns\n", get_average(read_latencies, n_read_times));
+    printf( "[READ] precise p90 %ld p95 %ld p99 %ld p999 %ld p9999 %ld ns\n",
+        get_p90(read_latencies, n_read_times),
+        get_p95(read_latencies, n_read_times),
+        get_p99(read_latencies, n_read_times),
+        get_p999(read_latencies, n_read_times),
+        get_p9999(read_latencies, n_read_times));
+    
+
+    printf("Running phase precise time: %ld ns\n", get_total_time(total_latencies));
+    printf("Running phase precise throughput: %.03f ops/sec\n", get_throughput(total_latencies, 2 * n_running_phase_ops));
+    printf("Running phase precise average latency %.03f ns\n", get_average(total_latencies, 2 * n_running_phase_ops));
+    printf("Running phase precise p90 %ld p95 %ld p99 %ld p999 %ld p9999 %ld ns\n",
+        get_p90(total_latencies, n_running_phase_ops),
+        get_p95(total_latencies, n_running_phase_ops),
+        get_p99(total_latencies, n_running_phase_ops),
+        get_p999(total_latencies, n_running_phase_ops),
+        get_p9999(total_latencies, n_running_phase_ops));
+
     fflush(stdout);
 }
 
